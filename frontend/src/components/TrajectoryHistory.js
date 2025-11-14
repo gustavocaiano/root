@@ -8,7 +8,7 @@ const formatInteger = (value) => {
   return str.replace(/\.0+$/, '');
 };
 
-const TrajectoryHistory = ({ trajectories, selectedLocation, onPointClick }) => {
+const TrajectoryHistory = ({ trajectories, selectedLocation, selectedPointId, onPointClick }) => {
   const [userClickedItem, setUserClickedItem] = React.useState(null);
   
   // Get all points from trajectories
@@ -38,16 +38,42 @@ const TrajectoryHistory = ({ trajectories, selectedLocation, onPointClick }) => 
     );
   };
 
+  // Check if this is the primary highlighted point
+  const isPrimaryHighlighted = (point) => {
+    if (!selectedLocation) return false;
+    // If we have a specific point ID, that's the primary
+    if (selectedPointId) {
+      return point.id === selectedPointId;
+    }
+    // Otherwise, find the first point at this location
+    const tolerance = 0.000001;
+    const pointsAtLocation = allPoints.filter(p => 
+      Math.abs(p.latitude - selectedLocation.latitude) < tolerance &&
+      Math.abs(p.longitude - selectedLocation.longitude) < tolerance
+    );
+    if (pointsAtLocation.length === 0) return false;
+    // Sort by timestamp to get the first one
+    pointsAtLocation.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+    return point.id === pointsAtLocation[0].id;
+  };
+
+  // Check if this is a secondary highlighted point (same location but not primary)
+  const isSecondaryHighlighted = (point) => {
+    if (!selectedLocation) return false;
+    // Must be at the location but not the primary
+    return isAtSelectedLocation(point) && !isPrimaryHighlighted(point);
+  };
+
   // Scroll to highlighted item when location is selected (only if not from user click)
   React.useEffect(() => {
+    // Only scroll if clicking on map (not from history click)
     if (selectedLocation && allPoints.length > 0 && !userClickedItem) {
       // Use setTimeout to ensure DOM is updated
       setTimeout(() => {
-        // Find the first highlighted item and scroll to it
-        const highlightedItems = document.querySelectorAll('.history-item.highlighted');
-        if (highlightedItems.length > 0) {
-          // Scroll to the first highlighted item
-          highlightedItems[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+        // Find the primary highlighted item and scroll to it
+        const primaryItem = document.querySelector('.history-item.highlighted-primary');
+        if (primaryItem) {
+          primaryItem.scrollIntoView({ behavior: 'smooth', block: 'center' });
         }
       }, 100);
     }
@@ -55,7 +81,7 @@ const TrajectoryHistory = ({ trajectories, selectedLocation, onPointClick }) => 
     if (userClickedItem) {
       setTimeout(() => setUserClickedItem(null), 200);
     }
-  }, [selectedLocation, allPoints.length, userClickedItem]);
+  }, [selectedLocation, selectedPointId, allPoints.length, userClickedItem]);
 
   if (allPoints.length === 0) {
     return (
@@ -83,26 +109,21 @@ const TrajectoryHistory = ({ trajectories, selectedLocation, onPointClick }) => 
       <div className="history-list-container">
         <div className="history-list">
           {allPoints.map((point, index) => {
-            const isSelected = isAtSelectedLocation(point);
+            const isPrimary = isPrimaryHighlighted(point);
+            const isSecondary = isSecondaryHighlighted(point);
             const isFirst = index === 0;
             
             return (
               <div
                 key={point.id}
                 id={`history-item-${point.id}`}
-                className={`history-item ${isSelected ? 'highlighted' : ''} ${isFirst ? 'first-point' : ''}`}
+                className={`history-item ${isPrimary ? 'highlighted-primary' : ''} ${isSecondary ? 'highlighted-secondary' : ''} ${isFirst ? 'first-point' : ''}`}
                 onClick={() => {
                   if (onPointClick) {
-                    // Mark that user clicked this item
+                    // Mark that user clicked this item (prevents auto-scroll)
                     setUserClickedItem(point.id);
                     onPointClick(point);
-                    // Scroll this specific item into view
-                    setTimeout(() => {
-                      const element = document.getElementById(`history-item-${point.id}`);
-                      if (element) {
-                        element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                      }
-                    }, 50);
+                    // Don't scroll - user wants to stay in place
                   }
                 }}
                 title={`Click to view details`}
@@ -117,7 +138,7 @@ const TrajectoryHistory = ({ trajectories, selectedLocation, onPointClick }) => 
                     {isFirst && (
                       <span className="badge badge-first">First</span>
                     )}
-                    {isSelected && (
+                    {isPrimary && (
                       <span className="badge badge-selected">📍 Selected</span>
                     )}
                   </div>

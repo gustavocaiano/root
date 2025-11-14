@@ -365,7 +365,7 @@ function PointDetails({ point, onClose, onViewLocationHistory, filteredPoints, o
   );
 }
 
-const MapView = ({ trajectories, showLines, onLocationSelect, selectedLocation, highlightedPoint }) => {
+const MapView = ({ trajectories, showLines, onLocationSelect, selectedLocation, selectedPointId, highlightedPoint }) => {
   const [selectedPoint, setSelectedPoint] = useState(null);
   const [locationHistory, setLocationHistory] = useState(null);
   
@@ -417,12 +417,15 @@ const MapView = ({ trajectories, showLines, onLocationSelect, selectedLocation, 
         }
       });
 
+      // Sort group by timestamp to ensure firstPoint is chronologically first
+      group.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
       groups.push({
         points: group,
         latitude: point.latitude,
         longitude: point.longitude,
         count: group.length,
-        firstPoint: group[0],
+        firstPoint: group[0], // This is now guaranteed to be the earliest chronologically
         isFirst: index === 0
       });
     });
@@ -463,7 +466,7 @@ const MapView = ({ trajectories, showLines, onLocationSelect, selectedLocation, 
               {showLines && trajectory.points.length > 1 && (
                 <Polyline
                   positions={trajectory.points.map(p => [p.latitude, p.longitude])}
-                  color={color}
+                  color="#ffff00aa"
                   weight={3}
                   opacity={0.7}
                 />
@@ -496,7 +499,10 @@ const MapView = ({ trajectories, showLines, onLocationSelect, selectedLocation, 
                           longitude: group.longitude
                         };
                         if (onLocationSelect) {
-                          onLocationSelect(location);
+                          // Find the first point chronologically at this location
+                          // Group points are already sorted by timestamp, so firstPoint is the earliest
+                          // Pass the first point's ID so we can scroll to the specific point
+                          onLocationSelect(location, group.firstPoint.id);
                         }
                       },
                     }}
@@ -538,7 +544,7 @@ const MapView = ({ trajectories, showLines, onLocationSelect, selectedLocation, 
                               longitude: group.longitude
                             };
                             if (onLocationSelect) {
-                              onLocationSelect(location);
+                              onLocationSelect(location, group.firstPoint.id);
                             }
                             setLocationHistory({
                               targetNumber: trajectory.target_number,

@@ -17,6 +17,7 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [stats, setStats] = useState(null);
   const [selectedLocation, setSelectedLocation] = useState(null);
+  const [selectedPointId, setSelectedPointId] = useState(null);
   const [filtersVisible, setFiltersVisible] = useState(true);
 
   // Fetch targets on mount
@@ -153,8 +154,12 @@ function App() {
               <MapView 
                 trajectories={trajectories}
                 showLines={showLines}
-                onLocationSelect={(location) => setSelectedLocation(location)}
+                onLocationSelect={(location, pointId) => {
+                  setSelectedLocation(location);
+                  setSelectedPointId(pointId);
+                }}
                 selectedLocation={selectedLocation}
+                selectedPointId={selectedPointId}
                 highlightedPoint={selectedLocation ? trajectories.flatMap(t => t.points).find(p => {
                   if (!selectedLocation) return false;
                   const tolerance = 0.000001;
@@ -165,17 +170,19 @@ function App() {
             )}
           </div>
           <div className="history-sidebar">
-            <TrajectoryHistory
-              trajectories={trajectories}
-              selectedLocation={selectedLocation}
-              onPointClick={(point) => {
-                // Highlight point in map
-                setSelectedLocation({
-                  latitude: point.latitude,
-                  longitude: point.longitude
-                });
-              }}
-            />
+                <TrajectoryHistory
+                  trajectories={trajectories}
+                  selectedLocation={selectedLocation}
+                  selectedPointId={selectedPointId}
+                  onPointClick={(point) => {
+                    // Highlight point in map
+                    setSelectedLocation({
+                      latitude: point.latitude,
+                      longitude: point.longitude
+                    });
+                    setSelectedPointId(point.id);
+                  }}
+                />
           </div>
         </main>
       </div>

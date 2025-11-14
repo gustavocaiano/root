@@ -62,11 +62,18 @@
   transform: translateX(2px);
 }
 
-.history-item.highlighted {
+.history-item.highlighted-primary {
   background: #c8e6c9;
   border-color: #43a047;
   border-width: 2px;
   box-shadow: 0 2px 4px rgba(67, 160, 71, 0.3);
+}
+
+.history-item.highlighted-secondary {
+  background: #e8f5e9;
+  border-color: #81c784;
+  border-width: 1.5px;
+  box-shadow: 0 1px 2px rgba(67, 160, 71, 0.2);
 }
 
 .history-item.first-point {
