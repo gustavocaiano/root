@@ -1,0 +1,63 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: trajectory-db
+    environment:
+      POSTGRES_USER: trajuser
+      POSTGRES_PASSWORD: trajpass
+      POSTGRES_DB: trajectorydb
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trajuser"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app-network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: trajectory-backend
+    environment:
+      DATABASE_URL: postgresql://trajuser:trajpass@postgres:5432/trajectorydb
+      CORS_ORIGINS: http://localhost:3000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/uploads:/app/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - app-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: trajectory-frontend
+    environment:
+      REACT_APP_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+    depends_on:
+      - backend
+    networks:
+      - app-network
+
+volumes:
+  postgres_data:
+
+networks:
+  app-network:
+    driver: bridge
+

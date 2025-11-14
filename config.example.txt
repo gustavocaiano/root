@@ -1,0 +1,15 @@
+# Example Configuration Variables
+# Copy these to your docker-compose.yml or .env file if needed
+
+# Backend Configuration
+DATABASE_URL=postgresql://trajuser:trajpass@postgres:5432/trajectorydb
+CORS_ORIGINS=http://localhost:3000
+
+# Frontend Configuration
+REACT_APP_API_URL=http://localhost:8000
+
+# Database Configuration
+POSTGRES_USER=trajuser
+POSTGRES_PASSWORD=trajpass
+POSTGRES_DB=trajectorydb
+
