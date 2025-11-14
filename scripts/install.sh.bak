@@ -1,0 +1,881 @@
+#!/bin/bash
+
+# Script de instalação para criar versão portátil da aplicação
+# Este script prepara a aplicação para ser executada no Windows
+
+set -e  # Parar em erros críticos
+
+echo "=========================================="
+echo "Instalação Portátil - Trajectory Viewer"
+echo "=========================================="
+echo ""
+
+# Perguntar onde instalar
+echo "Onde deseja instalar a aplicação?"
+echo "1. Disco USB (ex: /Volumes/MYUSB)"
+echo "2. Pasta local (ex: ~/Desktop)"
+read -p "Escolha uma opção (1 ou 2): " install_option
+
+if [ "$install_option" = "1" ]; then
+    echo ""
+    echo "Discos disponíveis:"
+    ls -d /Volumes/* 2>/dev/null | grep -v "^/Volumes/$" || echo "Nenhum disco encontrado"
+    read -p "Digite o caminho do disco (ex: /Volumes/MYUSB): " install_path
+else
+    read -p "Digite o caminho da pasta (ex: ~/Desktop/rootApp): " install_path
+fi
+
+# Expandir ~ e variáveis
+install_path=$(eval echo "$install_path")
+
+# Criar pasta de instalação
+APP_DIR="$install_path/rootApp"
+echo ""
+echo "Instalando em: $APP_DIR"
+read -p "Continuar? (s/n): " confirm
+
+if [ "$confirm" != "s" ] && [ "$confirm" != "S" ]; then
+    echo "Instalação cancelada."
+    exit 1
+fi
+
+# Criar estrutura de pastas
+echo ""
+echo "Criando estrutura de pastas..."
+mkdir -p "$APP_DIR"
+mkdir -p "$APP_DIR/.python"
+mkdir -p "$APP_DIR/.node"
+mkdir -p "$APP_DIR/.data"  # Criar primeiro para que database.py detecte modo portátil
+mkdir -p "$APP_DIR/backend"
+mkdir -p "$APP_DIR/frontend"
+mkdir -p "$APP_DIR/backend/app"
+mkdir -p "$APP_DIR/backend/uploads"
+mkdir -p "$APP_DIR/frontend/src"
+mkdir -p "$APP_DIR/frontend/public"
+mkdir -p "$APP_DIR/frontend/build"
+
+# Criar arquivo marcador para garantir detecção de modo portátil
+touch "$APP_DIR/.data/.portable"
+
+# Copiar código da aplicação
+echo "Copiando código da aplicação..."
+cp -r backend/app/* "$APP_DIR/backend/app/" || true
+cp backend/requirements.txt "$APP_DIR/backend/"
+cp -r frontend/src/* "$APP_DIR/frontend/src/" || true
+cp -r frontend/public/* "$APP_DIR/frontend/public/" || true
+cp frontend/package.json "$APP_DIR/frontend/"
+
+# Modificar database.py para usar SQLite em modo portátil
+echo "Adaptando database.py para modo portátil..."
+cat > "$APP_DIR/backend/app/database.py" << 'EOF'
+from sqlalchemy import create_engine
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+import os
+
+# Detectar se estamos em modo portátil (verificar se existe pasta .data e arquivo marcador)
+APP_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DATA_DIR = os.path.join(APP_DIR, ".data")
+PORTABLE_MARKER = os.path.join(DATA_DIR, ".portable")
+IS_PORTABLE = os.path.exists(PORTABLE_MARKER)
+
+if IS_PORTABLE:
+    # Modo portátil: usar SQLite
+    DB_PATH = os.path.join(DATA_DIR, "trajectory.db")
+    DATABASE_URL = f"sqlite:///{DB_PATH}"
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+else:
+    # Modo normal: usar PostgreSQL
+    DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://trajuser:trajpass@localhost:5432/trajectorydb")
+    engine = create_engine(DATABASE_URL)
+
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+Base = declarative_base()
+
+
+def get_db():
+    """Dependency for getting database session"""
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def init_db():
+    """Initialize database tables"""
+    # Criar diretório .data se estiver em modo portátil
+    if IS_PORTABLE:
+        os.makedirs(DATA_DIR, exist_ok=True)
+    
+    Base.metadata.create_all(bind=engine)
+    
+    # Adicionar coluna product_number se não existir (para bases de dados existentes)
+    try:
+        from sqlalchemy import inspect, text
+        inspector = inspect(engine)
+        
+        # Verificar se a tabela locations existe
+        if 'locations' in inspector.get_table_names():
+            columns = [col['name'] for col in inspector.get_columns('locations')]
+            
+            if 'product_number' not in columns:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE locations ADD COLUMN product_number VARCHAR(50)"))
+                    conn.commit()
+    except Exception as e:
+        # Se a migração falhar, apenas logar - a tabela será criada com a coluna no próximo create_all
+        print(f"Warning: Could not migrate product_number column: {e}")
+EOF
+
+# Modificar main.py para usar caminho relativo de uploads em modo portátil
+echo "Adaptando caminhos em main.py..."
+# Criar um patch para o main.py que ajusta o UPLOAD_DIR
+cat > "$APP_DIR/backend/app/main_portable_patch.py" << 'EOFPATCH'
+# Este arquivo será importado para ajustar o UPLOAD_DIR
+import os
+
+# Detectar diretório da aplicação
+APP_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+UPLOAD_DIR = os.path.join(APP_DIR, "backend", "uploads")
+EOFPATCH
+
+# Aplicar patch ao main.py copiado
+sed -i.bak "s|UPLOAD_DIR = \"/app/uploads\"|UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), \"backend\", \"uploads\")|" "$APP_DIR/backend/app/main.py" 2>/dev/null || \
+python3 << PYTHONPATCH
+import re
+import os
+
+main_path = "$APP_DIR/backend/app/main.py"
+with open(main_path, 'r') as f:
+    content = f.read()
+
+# Substituir UPLOAD_DIR
+content = re.sub(
+    r'UPLOAD_DIR = "/app/uploads"',
+    'UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "backend", "uploads")',
+    content
+)
+
+with open(main_path, 'w') as f:
+    f.write(content)
+PYTHONPATCH
+
+# Copiar schemas e utils (já copiados acima, mas garantir)
+cp backend/app/schemas.py "$APP_DIR/backend/app/" 2>/dev/null || true
+cp backend/app/utils.py "$APP_DIR/backend/app/" 2>/dev/null || true
+
+# Criar __init__.py se não existir
+touch "$APP_DIR/backend/app/__init__.py"
+
+# Remover arquivo de patch temporário se existir
+rm -f "$APP_DIR/backend/app/main_portable_patch.py" 2>/dev/null || true
+rm -f "$APP_DIR/backend/app/main.py.bak" 2>/dev/null || true
+
+# Função para baixar Python portátil
+download_python_portable() {
+    echo ""
+    echo "Baixando Python portátil para Windows..."
+    PYTHON_VERSION="3.11.9"
+    PYTHON_URL="https://www.python.org/ftp/python/${PYTHON_VERSION}/python-${PYTHON_VERSION}-embed-amd64.zip"
+    PYTHON_ZIP="$APP_DIR/.python/python-embed.zip"
+    
+    # Criar diretório temporário
+    mkdir -p "$APP_DIR/.python"
+    
+    # Baixar Python embeddable
+    if command -v curl >/dev/null 2>&1; then
+        curl -L -o "$PYTHON_ZIP" "$PYTHON_URL" || {
+            echo "Erro ao baixar Python. Tentando com wget..."
+            if command -v wget >/dev/null 2>&1; then
+                wget -O "$PYTHON_ZIP" "$PYTHON_URL" || {
+                    echo "AVISO: Não foi possível baixar Python automaticamente."
+                    echo "Por favor, baixe manualmente de: $PYTHON_URL"
+                    echo "E extraia para: $APP_DIR/.python/"
+                    return 1
+                }
+            else
+                echo "AVISO: curl e wget não encontrados. Não é possível baixar Python."
+                echo "Por favor, baixe manualmente de: $PYTHON_URL"
+                echo "E extraia para: $APP_DIR/.python/"
+                return 1
+            fi
+        }
+    elif command -v wget >/dev/null 2>&1; then
+        wget -O "$PYTHON_ZIP" "$PYTHON_URL" || {
+            echo "AVISO: Não foi possível baixar Python automaticamente."
+            echo "Por favor, baixe manualmente de: $PYTHON_URL"
+            echo "E extraia para: $APP_DIR/.python/"
+            return 1
+        }
+    else
+        echo "AVISO: curl e wget não encontrados. Não é possível baixar Python."
+        echo "Por favor, baixe manualmente de: $PYTHON_URL"
+        echo "E extraia para: $APP_DIR/.python/"
+        return 1
+    fi
+    
+    # Extrair Python
+    if command -v unzip >/dev/null 2>&1; then
+        echo "Extraindo Python..."
+        cd "$APP_DIR/.python"
+        unzip -q "$PYTHON_ZIP" || {
+            echo "Erro ao extrair Python. Verifique se o arquivo está completo."
+            return 1
+        }
+        rm -f "$PYTHON_ZIP"
+        
+        # Criar python.bat para facilitar uso
+        cat > python.bat << 'PYBAT'
+@echo off
+python.exe %*
+PYBAT
+        
+        # Configurar Python embeddable para suportar pip e venv
+        # Criar python311._pth modificado para permitir imports locais
+        if [ -f "python311._pth" ]; then
+            # Fazer backup
+            cp python311._pth python311._pth.bak 2>/dev/null || true
+            # Adicionar linha para permitir imports de site-packages
+            if ! grep -q "import site" python311._pth; then
+                echo "import site" >> python311._pth
+            fi
+        fi
+        
+        # Baixar ensurepip e venv se necessário (Python embeddable pode não ter)
+        echo "Verificando se venv esta disponivel..." >> "$APP_DIR/.python/install.log" 2>&1 || true
+        
+        # Criar get-pip.py para instalar pip
+        echo "Baixando get-pip.py..."
+        if command -v curl >/dev/null 2>&1; then
+            curl -L -o get-pip.py https://bootstrap.pypa.io/get-pip.py || true
+        elif command -v wget >/dev/null 2>&1; then
+            wget -O get-pip.py https://bootstrap.pypa.io/get-pip.py || true
+        fi
+        
+        # Criar script de instalação de pip para Windows
+        cat > install_pip.bat << 'PIPINSTALL'
+@echo off
+if exist get-pip.py (
+    python.exe get-pip.py --quiet
+    if exist Scripts\pip.exe (
+        echo pip instalado com sucesso!
+    ) else (
+        echo AVISO: pip pode nao ter sido instalado corretamente.
+    )
+) else (
+    echo ERRO: get-pip.py nao encontrado!
+)
+PIPINSTALL
+        
+        cd - > /dev/null
+        echo "Python portátil instalado em: $APP_DIR/.python/"
+        return 0
+    else
+        echo "AVISO: unzip não encontrado. Não é possível extrair Python."
+        echo "Por favor, extraia manualmente: $PYTHON_ZIP para $APP_DIR/.python/"
+        return 1
+    fi
+}
+
+# Função para baixar Node.js portátil
+download_nodejs_portable() {
+    echo ""
+    echo "Baixando Node.js portátil para Windows..."
+    NODE_VERSION="v18.20.4"
+    NODE_URL="https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-win-x64.zip"
+    NODE_ZIP="$APP_DIR/.node/nodejs.zip"
+    
+    # Criar diretório temporário
+    mkdir -p "$APP_DIR/.node"
+    
+    # Baixar Node.js
+    if command -v curl >/dev/null 2>&1; then
+        curl -L -o "$NODE_ZIP" "$NODE_URL" || {
+            echo "Erro ao baixar Node.js. Tentando com wget..."
+            if command -v wget >/dev/null 2>&1; then
+                wget -O "$NODE_ZIP" "$NODE_URL" || {
+                    echo "AVISO: Não foi possível baixar Node.js automaticamente."
+                    echo "Por favor, baixe manualmente de: $NODE_URL"
+                    echo "E extraia para: $APP_DIR/.node/"
+                    return 1
+                }
+            else
+                echo "AVISO: curl e wget não encontrados. Não é possível baixar Node.js."
+                echo "Por favor, baixe manualmente de: $NODE_URL"
+                echo "E extraia para: $APP_DIR/.node/"
+                return 1
+            fi
+        }
+    elif command -v wget >/dev/null 2>&1; then
+        wget -O "$NODE_ZIP" "$NODE_URL" || {
+            echo "AVISO: Não foi possível baixar Node.js automaticamente."
+            echo "Por favor, baixe manualmente de: $NODE_URL"
+            echo "E extraia para: $APP_DIR/.node/"
+            return 1
+        }
+    else
+        echo "AVISO: curl e wget não encontrados. Não é possível baixar Node.js."
+        echo "Por favor, baixe manualmente de: $NODE_URL"
+        echo "E extraia para: $APP_DIR/.node/"
+        return 1
+    fi
+    
+    # Extrair Node.js
+    if command -v unzip >/dev/null 2>&1; then
+        echo "Extraindo Node.js..."
+        cd "$APP_DIR/.node"
+        unzip -q "$NODE_ZIP" || {
+            echo "Erro ao extrair Node.js. Verifique se o arquivo está completo."
+            return 1
+        }
+        rm -f "$NODE_ZIP"
+        
+        # Mover conteúdo da pasta node-*-win-x64 para .node
+        if [ -d "node-${NODE_VERSION}-win-x64" ]; then
+            mv "node-${NODE_VERSION}-win-x64"/* .
+            rm -rf "node-${NODE_VERSION}-win-x64"
+        fi
+        
+        cd - > /dev/null
+        echo "Node.js portátil instalado em: $APP_DIR/.node/"
+        return 0
+    else
+        echo "AVISO: unzip não encontrado. Não é possível extrair Node.js."
+        echo "Por favor, extraia manualmente: $NODE_ZIP para $APP_DIR/.node/"
+        return 1
+    fi
+}
+
+# Perguntar se deseja baixar Python e Node.js
+echo ""
+echo "AVISO: Python e Node.js embeddable têm limitações (não incluem venv/pip completos)."
+echo ""
+echo "Opções de instalação:"
+echo "1. Criar instalação SEM Python/Node.js (usuário instala no Windows - RECOMENDADO)"
+echo "2. Tentar baixar Python/Node.js portáteis (pode ter problemas)"
+read -p "Escolha (1 ou 2): " download_option
+
+if [ "$download_option" = "2" ]; then
+    download_python_portable
+    download_nodejs_portable
+    echo ""
+    echo "Python e Node.js portáteis foram baixados!"
+    echo "NOTA: Pode ser necessário instalar Python/Node.js completos no Windows se houver problemas."
+    download_runtimes="s"
+else
+    echo ""
+    echo "Pulando download de Python e Node.js."
+    echo "A aplicação precisará de Python e Node.js instalados no Windows."
+    download_runtimes="n"
+fi
+
+# Criar script start.bat para Windows (VERSÃO SIMPLIFICADA)
+echo "Criando start.bat para Windows..."
+cat > "$APP_DIR/start.bat" << 'BATEOF'
+@echo off
+setlocal enabledelayedexpansion
+REM Script de inicialização para Windows - VERSÃO SIMPLIFICADA
+REM Inicia backend e frontend da aplicação portátil
+
+REM Redirecionar erros para arquivo de log
+set "LOG_FILE=%~dp0start_error.log"
+echo Inicio: %date% %time% > "%LOG_FILE%"
+
+echo ==========================================
+echo Trajectory Viewer - Versao Portatil
+echo ==========================================
+echo.
+
+REM Obter diretório do script
+set "APP_DIR=%~dp0"
+if "%APP_DIR:~-1%"=="\" set "APP_DIR=%APP_DIR:~0,-1%"
+
+cd /d "%APP_DIR%" || (
+    echo ERRO: Nao foi possivel acessar diretorio da aplicacao
+    pause
+    exit /b 1
+)
+
+REM Verificar Python (preferir sistema, fallback para portátil)
+set "PYTHON_CMD=python"
+python --version >nul 2>&1
+if errorlevel 1 (
+    echo Python do sistema nao encontrado, tentando portatil...
+    if exist ".python\python.exe" (
+        set "PATH=%APP_DIR%\.python;%APP_DIR%\.python\Scripts;%PATH%"
+        set "PYTHON_CMD=%APP_DIR%\.python\python.exe"
+    ) else (
+        echo.
+        echo ERRO: Python nao encontrado!
+        echo Por favor, instale Python 3.11 ou superior.
+        echo Download: https://www.python.org/downloads/
+        echo IMPORTANTE: Marque "Add Python to PATH" durante instalacao
+        echo.
+        pause
+        exit /b 1
+    )
+)
+
+REM Verificar Node.js (preferir sistema, fallback para portátil)
+set "NODE_CMD=node"
+set "NPM_CMD=npm"
+node --version >nul 2>&1
+if errorlevel 1 (
+    echo Node.js do sistema nao encontrado, tentando portatil...
+    if exist ".node\node.exe" (
+        set "PATH=%APP_DIR%\.node;%PATH%"
+        set "NODE_CMD=%APP_DIR%\.node\node.exe"
+        set "NPM_CMD=%APP_DIR%\.node\npm.cmd"
+    ) else (
+        echo.
+        echo ERRO: Node.js nao encontrado!
+        echo Por favor, instale Node.js 18 ou superior.
+        echo Download: https://nodejs.org/
+        echo.
+        pause
+        exit /b 1
+    )
+)
+
+echo Python: OK
+echo Node.js: OK
+echo.
+
+REM ==========================================
+REM BACKEND
+REM ==========================================
+echo Configurando backend...
+cd backend || (
+    echo ERRO: Pasta backend nao encontrada
+    pause
+    exit /b 1
+)
+
+REM Criar ambiente virtual se nao existir
+if not exist ".venv" (
+    echo Criando ambiente virtual Python...
+    %PYTHON_CMD% -m venv .venv >> "%LOG_FILE%" 2>&1
+    if errorlevel 1 (
+        echo ERRO: Falha ao criar ambiente virtual
+        echo Tentando com virtualenv...
+        %PYTHON_CMD% -m pip install virtualenv >> "%LOG_FILE%" 2>&1
+        %PYTHON_CMD% -m virtualenv .venv >> "%LOG_FILE%" 2>&1
+        if errorlevel 1 (
+            echo ERRO: Nao foi possivel criar ambiente virtual
+            echo Verifique o log: %LOG_FILE%
+            pause
+            exit /b 1
+        )
+    )
+)
+
+REM Ativar ambiente virtual
+call .venv\Scripts\activate.bat || (
+    echo ERRO: Falha ao ativar ambiente virtual
+    pause
+    exit /b 1
+)
+
+REM Instalar dependências
+echo Instalando dependencias Python...
+python -m pip install --quiet --upgrade pip >> "%LOG_FILE%" 2>&1
+python -m pip install --quiet -r requirements.txt >> "%LOG_FILE%" 2>&1
+if errorlevel 1 (
+    echo ERRO: Falha ao instalar dependencias Python
+    echo Verifique o log: %LOG_FILE%
+    pause
+    exit /b 1
+)
+
+REM Iniciar backend
+echo Iniciando backend...
+start "Trajectory Backend" cmd /k "cd /d %APP_DIR%\backend && .venv\Scripts\activate.bat && python -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
+
+cd ..
+
+REM Aguardar backend iniciar
+timeout /t 3 /nobreak >nul
+
+REM ==========================================
+REM FRONTEND
+REM ==========================================
+echo Configurando frontend...
+cd frontend || (
+    echo ERRO: Pasta frontend nao encontrada
+    pause
+    exit /b 1
+)
+
+REM Instalar dependências se necessário
+if not exist "node_modules" (
+    echo Instalando dependencias Node.js (pode demorar)...
+    call %NPM_CMD% install >> "%LOG_FILE%" 2>&1
+    if errorlevel 1 (
+        echo ERRO: Falha ao instalar dependencias Node.js
+        echo Verifique o log: %LOG_FILE%
+        pause
+        exit /b 1
+    )
+)
+
+REM Iniciar frontend
+echo Iniciando frontend...
+start "Trajectory Frontend" cmd /k "cd /d %APP_DIR%\frontend && %NPM_CMD% start"
+
+cd ..
+
+echo.
+echo ==========================================
+echo Aplicacao iniciada com sucesso!
+echo ==========================================
+echo Backend: http://localhost:8000
+echo Frontend: http://localhost:3000
+echo ==========================================
+echo.
+echo O navegador deve abrir automaticamente.
+echo Feche as janelas do backend/frontend para parar a aplicacao.
+echo.
+echo Log de erros: %LOG_FILE%
+echo.
+pause
+BATEOF
+
+# Criar script de debug
+    echo Criando ambiente virtual Python...
+    echo Python usado: %PYTHON_EXE% >> "%LOG_FILE%"
+    echo Testando Python... >> "%LOG_FILE%"
+    "%PYTHON_EXE%" --version >> "%LOG_FILE%" 2>&1
+    if errorlevel 1 (
+        echo ERRO: Python nao esta funcionando corretamente >> "%LOG_FILE%"
+        echo ERRO: Python nao esta funcionando corretamente
+        echo Teste manualmente: "%PYTHON_EXE%" --version
+        pause
+        exit /b 1
+    )
+    
+    REM Verificar se venv esta disponivel
+    echo Verificando modulo venv... >> "%LOG_FILE%"
+    "%PYTHON_EXE%" -m venv --help >> "%LOG_FILE%" 2>&1
+    if errorlevel 1 (
+        echo AVISO: Modulo venv nao disponivel, tentando virtualenv... >> "%LOG_FILE%"
+        echo AVISO: Modulo venv nao disponivel, usando virtualenv como alternativa
+        REM Tentar usar virtualenv como alternativa
+        REM Primeiro verificar se pip esta disponivel
+        "%PYTHON_EXE%" -m pip --version >> "%LOG_FILE%" 2>&1
+        if errorlevel 1 (
+            echo ERRO: pip nao esta disponivel para instalar virtualenv >> "%LOG_FILE%"
+            echo ERRO: pip nao esta disponivel. Instale pip primeiro.
+            pause
+            exit /b 1
+        )
+        REM Instalar virtualenv se necessario
+        "%PYTHON_EXE%" -m pip show virtualenv >> "%LOG_FILE%" 2>&1
+        if errorlevel 1 (
+            echo Instalando virtualenv... >> "%LOG_FILE%"
+            "%PYTHON_EXE%" -m pip install --quiet virtualenv >> "%LOG_FILE%" 2>&1
+            if errorlevel 1 (
+                echo ERRO: Falha ao instalar virtualenv >> "%LOG_FILE%"
+                echo ERRO: Nao foi possivel instalar virtualenv
+                pause
+                exit /b 1
+            )
+        )
+        REM Criar venv com virtualenv
+        echo Criando venv com virtualenv... >> "%LOG_FILE%"
+        "%PYTHON_EXE%" -m virtualenv .venv >> "%LOG_FILE%" 2>&1
+        if errorlevel 1 (
+            echo ERRO: Falha ao criar ambiente virtual com virtualenv >> "%LOG_FILE%"
+            echo ERRO: Falha ao criar ambiente virtual Python
+            echo Detalhes no arquivo: %LOG_FILE%
+            pause
+            exit /b 1
+        )
+    ) else (
+        echo Criando venv... >> "%LOG_FILE%"
+        "%PYTHON_EXE%" -m venv .venv >> "%LOG_FILE%" 2>&1
+        if errorlevel 1 (
+            echo ERRO: Falha ao criar ambiente virtual >> "%LOG_FILE%"
+            echo ERRO: Falha ao criar ambiente virtual Python
+            echo Detalhes no arquivo: %LOG_FILE%
+            pause
+            exit /b 1
+        )
+    )
+    echo Ambiente virtual criado com sucesso >> "%LOG_FILE%"
+) else (
+    echo Ambiente virtual ja existe >> "%LOG_FILE%"
+)
+
+echo Ativando ambiente virtual...
+if not exist ".venv\Scripts\activate.bat" (
+    echo ERRO: activate.bat nao encontrado >> "%LOG_FILE%"
+    echo ERRO: Ambiente virtual pode estar corrompido
+    pause
+    exit /b 1
+)
+call .venv\Scripts\activate.bat
+if errorlevel 1 (
+    echo ERRO: Falha ao ativar ambiente virtual >> "%LOG_FILE%"
+    echo ERRO: Falha ao ativar ambiente virtual
+    pause
+    exit /b 1
+)
+
+echo Instalando dependencias Python...
+python -m pip install -q --upgrade pip >> "%LOG_FILE%" 2>&1
+if errorlevel 1 (
+    echo AVISO: Falha ao atualizar pip, continuando... >> "%LOG_FILE%"
+)
+python -m pip install -q -r requirements.txt >> "%LOG_FILE%" 2>&1
+if errorlevel 1 (
+    echo ERRO: Falha ao instalar dependencias Python >> "%LOG_FILE%"
+    echo ERRO: Falha ao instalar dependencias Python. Verifique start_error.log
+    pause
+    exit /b 1
+)
+
+echo.
+echo Iniciando backend...
+start "Trajectory Backend" cmd /k "cd /d %APP_DIR%backend && .venv\Scripts\activate.bat && python -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
+if errorlevel 1 (
+    echo ERRO: Falha ao iniciar backend >> "%LOG_FILE%"
+    echo ERRO: Falha ao iniciar backend
+    pause
+    exit /b 1
+)
+
+REM Aguardar backend iniciar
+timeout /t 3 /nobreak >nul
+
+echo.
+echo Verificando dependencias do frontend...
+cd ..\frontend
+if errorlevel 1 (
+    echo ERRO: Nao foi possivel mudar para diretorio frontend >> "%LOG_FILE%"
+    echo ERRO: Nao foi possivel mudar para diretorio frontend
+    pause
+    exit /b 1
+)
+
+if not exist "node_modules" (
+    echo Instalando dependencias Node.js...
+    call "%NPM_EXE%" install --silent >> "%LOG_FILE%" 2>&1
+    if errorlevel 1 (
+        echo ERRO: Falha ao instalar dependencias Node.js >> "%LOG_FILE%"
+        echo ERRO: Falha ao instalar dependencias Node.js. Verifique start_error.log
+        pause
+        exit /b 1
+    )
+)
+
+echo.
+echo Iniciando frontend...
+start "Trajectory Frontend" cmd /k "cd /d %APP_DIR%frontend && \"%NPM_EXE%\" start"
+if errorlevel 1 (
+    echo ERRO: Falha ao iniciar frontend >> "%LOG_FILE%"
+    echo ERRO: Falha ao iniciar frontend
+    pause
+    exit /b 1
+)
+
+echo.
+echo ==========================================
+echo Aplicacao iniciada!
+echo Backend: http://localhost:8000
+echo Frontend: http://localhost:3000
+echo ==========================================
+echo.
+echo Log de erros salvo em: start_error.log
+echo.
+echo Pressione qualquer tecla para fechar esta janela.
+echo As janelas do backend e frontend permanecerao abertas.
+pause
+BATEOF
+
+# Criar script de debug
+echo "Criando debug.bat para diagnóstico..."
+cat > "$APP_DIR/debug.bat" << 'DEBUGEOF'
+@echo off
+setlocal enabledelayedexpansion
+echo ==========================================
+echo DEBUG - Trajectory Viewer
+echo ==========================================
+echo.
+
+set "APP_DIR=%~dp0"
+echo Diretorio da aplicacao: %APP_DIR%
+echo.
+
+echo Verificando estrutura de pastas...
+if exist "%APP_DIR%\.python\python.exe" (
+    echo [OK] Python portatil encontrado
+    call "%APP_DIR%\.python\python.exe" --version 2>nul || "%APP_DIR%\.python\python.exe" --version
+    echo Testando modulo venv...
+    call "%APP_DIR%\.python\python.exe" -m venv --help >nul 2>&1
+    if errorlevel 1 (
+        echo [AVISO] Python portatil pode nao ter modulo venv
+        echo [INFO] Tentara usar virtualenv como alternativa
+    ) else (
+        echo [OK] Modulo venv disponivel
+    )
+) else (
+    echo [X] Python portatil NAO encontrado
+    python --version 2>nul && echo [OK] Python do sistema encontrado || echo [X] Python do sistema NAO encontrado
+)
+echo.
+
+if exist "%APP_DIR%\.node\node.exe" (
+    echo [OK] Node.js portatil encontrado
+    call "%APP_DIR%\.node\node.exe" --version 2>nul || "%APP_DIR%\.node\node.exe" --version
+) else (
+    echo [X] Node.js portatil NAO encontrado
+    node --version 2>nul && echo [OK] Node.js do sistema encontrado || echo [X] Node.js do sistema NAO encontrado
+)
+echo.
+
+echo Verificando backend...
+if exist "%APP_DIR%backend" (
+    echo [OK] Pasta backend existe
+    if exist "%APP_DIR%backend\requirements.txt" (
+        echo [OK] requirements.txt existe
+    ) else (
+        echo [X] requirements.txt NAO existe
+    )
+    if exist "%APP_DIR%backend\.venv" (
+        echo [OK] Ambiente virtual existe
+        if exist "%APP_DIR%backend\.venv\Scripts\activate.bat" (
+            echo [OK] activate.bat existe
+        ) else (
+            echo [X] activate.bat NAO existe
+        )
+    ) else (
+        echo [X] Ambiente virtual NAO existe
+    )
+) else (
+    echo [X] Pasta backend NAO existe
+)
+echo.
+
+echo Verificando frontend...
+if exist "%APP_DIR%frontend" (
+    echo [OK] Pasta frontend existe
+    if exist "%APP_DIR%frontend\package.json" (
+        echo [OK] package.json existe
+    ) else (
+        echo [X] package.json NAO existe
+    )
+    if exist "%APP_DIR%frontend\node_modules" (
+        echo [OK] node_modules existe
+    ) else (
+        echo [X] node_modules NAO existe
+    )
+) else (
+    echo [X] Pasta frontend NAO existe
+)
+echo.
+
+echo Verificando dados...
+if exist "%APP_DIR%.data" (
+    echo [OK] Pasta .data existe
+    if exist "%APP_DIR%.data\.portable" (
+        echo [OK] Arquivo .portable existe (modo portatil ativo)
+    ) else (
+        echo [X] Arquivo .portable NAO existe
+    )
+    if exist "%APP_DIR%.data\trajectory.db" (
+        echo [OK] Base de dados trajectory.db existe
+    ) else (
+        echo [INFO] Base de dados sera criada na primeira execucao
+    )
+) else (
+    echo [X] Pasta .data NAO existe
+)
+echo.
+
+echo Verificando portas...
+netstat -an | findstr ":8000" >nul && echo [AVISO] Porta 8000 esta em uso || echo [OK] Porta 8000 livre
+netstat -an | findstr ":3000" >nul && echo [AVISO] Porta 3000 esta em uso || echo [OK] Porta 3000 livre
+echo.
+
+if exist "%APP_DIR%start_error.log" (
+    echo ==========================================
+    echo Conteudo do start_error.log:
+    echo ==========================================
+    type "%APP_DIR%start_error.log"
+    echo.
+)
+
+echo ==========================================
+echo Pressione qualquer tecla para sair...
+pause >nul
+DEBUGEOF
+
+# Criar README para Windows
+echo "Criando README_WINDOWS.txt..."
+cat > "$APP_DIR/README_WINDOWS.txt" << 'EOF'
+==========================================
+Trajectory Viewer - Versão Portátil
+==========================================
+
+INSTRUÇÕES PARA WINDOWS:
+
+1. PRÉ-REQUISITOS:
+   Se Python e Node.js portáteis foram incluídos na instalação:
+   - Nenhum pré-requisito necessário! A aplicação é totalmente portátil.
+   
+   Se NÃO foram incluídos:
+   - Python 3.11 ou superior
+     Download: https://www.python.org/downloads/
+     IMPORTANTE: Marque a opção "Add Python to PATH" durante a instalação
+   
+   - Node.js 18 ou superior
+     Download: https://nodejs.org/
+     Use a versão LTS recomendada
+
+2. EXECUTAR A APLICAÇÃO:
+   - Clique duas vezes em "start.bat"
+   - Aguarde alguns segundos enquanto os serviços iniciam
+   - O navegador abrirá automaticamente em http://localhost:3000
+
+3. PARAR A APLICAÇÃO:
+   - Feche as janelas do backend e frontend que foram abertas
+   - Ou feche esta pasta
+
+4. DADOS:
+   - Os dados são armazenados em: .data\trajectory.db
+   - Os uploads são salvos em: backend\uploads\
+
+5. PROBLEMAS:
+   - Se o script fechar rapidamente, execute debug.bat para diagnosticar
+   - Verifique o arquivo start_error.log para detalhes de erros
+   - Se o Python não for encontrado, reinstale Python marcando "Add to PATH"
+   - Se o Node.js não for encontrado, reinstale Node.js
+   - Se houver erros, verifique se as portas 8000 e 3000 estão livres
+
+==========================================
+EOF
+
+echo ""
+echo "=========================================="
+echo "Instalação concluída!"
+echo "=========================================="
+echo ""
+echo "Aplicação instalada em: $APP_DIR"
+echo ""
+echo "PRÓXIMOS PASSOS:"
+echo "1. Copie a pasta rootApp para um disco USB ou PC Windows"
+if [ "$download_runtimes" = "s" ] || [ "$download_runtimes" = "S" ]; then
+    echo "2. No Windows, execute start.bat - não precisa instalar nada!"
+else
+    echo "2. No Windows, certifique-se de ter Python e Node.js instalados"
+fi
+echo "3. Execute start.bat para iniciar a aplicação"
+echo ""
+echo "NOTA: Esta versão usa SQLite em vez de PostgreSQL para simplificar."
+if [ "$download_runtimes" = "s" ] || [ "$download_runtimes" = "S" ]; then
+    echo "NOTA: Python e Node.js portáteis foram incluídos - aplicação totalmente portátil!"
+fi
+echo ""
+
